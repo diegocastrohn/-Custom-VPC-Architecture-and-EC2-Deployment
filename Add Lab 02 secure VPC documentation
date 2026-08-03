@@ -1,0 +1,466 @@
+# ☁️ Lab 03 — Secure AWS VPC Architecture
+
+## Public & Private Subnets with NAT Gateway and Bastion Host
+
+This project demonstrates the design and deployment of a segmented AWS network architecture using **public and private subnets**, controlled Internet access, a **NAT Gateway**, and secure administrative access through a **Bastion Host**.
+
+The objective was not only to deploy AWS resources, but also to understand how routing, NAT, security groups, private addressing, and SSH access work together in a cloud environment.
+
+---
+
+## 🎯 Project Objectives
+
+The main objectives of this laboratory were to:
+
+* Design a custom Amazon VPC.
+* Create public and private network segments.
+* Deploy subnets across multiple Availability Zones.
+* Configure Internet access for public resources.
+* Provide outbound Internet connectivity to private resources.
+* Prevent direct Internet exposure of private EC2 instances.
+* Implement secure administrative access through a Bastion Host.
+* Configure Security Group-to-Security Group access.
+* Practice AWS network troubleshooting.
+* Validate the architecture through real connectivity tests.
+
+---
+
+# 🏗️ Architecture Overview
+
+The environment uses the following architecture:
+
+```text
+                            INTERNET
+                                │
+                                │
+                       Internet Gateway
+                                │
+               ┌────────────────┴────────────────┐
+               │                                 │
+        Public Subnet A                   Public Subnet B
+         10.1.1.0/24                       10.1.2.0/24
+               │
+        ┌──────┴───────┐
+        │              │
+   Bastion Host    NAT Gateway
+        │              │
+        │ SSH          │ Outbound Internet
+        ▼              ▲
+────────────────────────────────────────────────────────
+               │
+        Private Subnet A                 Private Subnet B
+          10.1.3.0/24                      10.1.4.0/24
+               │
+          Private EC2
+          10.1.3.217
+          No Public IPv4
+```
+
+---
+
+# 🌐 Network Design
+
+## VPC
+
+| Parameter       | Value         |
+| --------------- | ------------- |
+| CIDR            | `10.1.0.0/16` |
+| Region          | `us-east-1`   |
+| Public Subnets  | 2             |
+| Private Subnets | 2             |
+
+The VPC was divided into multiple network segments to separate Internet-facing infrastructure from internal resources.
+
+---
+
+## Subnets
+
+| Subnet           | CIDR          | Type    |
+| ---------------- | ------------- | ------- |
+| Public Subnet A  | `10.1.1.0/24` | Public  |
+| Public Subnet B  | `10.1.2.0/24` | Public  |
+| Private Subnet A | `10.1.3.0/24` | Private |
+| Private Subnet B | `10.1.4.0/24` | Private |
+
+The architecture was designed with multiple Availability Zones in mind to provide a foundation for future high-availability implementations.
+
+---
+
+# 🛣️ Routing
+
+Two Route Tables were implemented.
+
+## Public Route Table
+
+```text
+10.1.0.0/16 → local
+0.0.0.0/0   → Internet Gateway
+```
+
+Associated with:
+
+* Public Subnet A
+* Public Subnet B
+
+This provides a route toward the Internet Gateway for public resources.
+
+---
+
+## Private Route Table
+
+```text
+10.1.0.0/16 → local
+0.0.0.0/0   → NAT Gateway
+```
+
+Associated with:
+
+* Private Subnet A
+* Private Subnet B
+
+Private resources therefore use the NAT Gateway for outbound Internet connectivity instead of communicating directly through the Internet Gateway.
+
+---
+
+# 🌍 Internet Gateway
+
+An Internet Gateway was attached to the VPC to provide Internet connectivity for resources deployed in the public network tier.
+
+Public resources require the appropriate routing and addressing configuration to use this gateway.
+
+---
+
+# 🔄 NAT Gateway
+
+A NAT Gateway was deployed inside a public subnet and assigned an Elastic IP.
+
+Its purpose is to allow resources inside private subnets to **initiate outbound connections toward the Internet without receiving public IPv4 addresses themselves**.
+
+Outbound traffic follows:
+
+```text
+Private EC2
+     ↓
+Private Route Table
+     ↓
+NAT Gateway
+     ↓
+Internet Gateway
+     ↓
+Internet
+```
+
+This allows operations such as:
+
+```bash
+sudo dnf update
+```
+
+and:
+
+```bash
+curl -I https://example.com
+```
+
+without exposing the private EC2 directly to the Internet.
+
+---
+
+# 🖥️ Bastion Host
+
+An Amazon Linux 2023 EC2 instance was deployed inside `Public Subnet A` and configured as a Bastion Host.
+
+Its role is to provide controlled administrative access to resources located inside private subnets.
+
+The access path is:
+
+```text
+Administrator
+      ↓
+     SSH
+      ↓
+Bastion Host
+      ↓
+     SSH
+      ↓
+Private EC2
+```
+
+The private EC2 does not require a public IPv4 address.
+
+---
+
+# 🛡️ Security Groups
+
+Security Groups were configured following the principle of least privilege.
+
+## Bastion Security Group
+
+Inbound:
+
+```text
+SSH / TCP 22
+Source: Administrator Public IP /32
+```
+
+This prevents unrestricted SSH access from the Internet.
+
+## Private EC2 Security Group
+
+Inbound:
+
+```text
+SSH / TCP 22
+Source: Bastion Security Group
+```
+
+Instead of allowing SSH from `0.0.0.0/0`, the private server accepts SSH connections only from resources associated with the Bastion Security Group.
+
+---
+
+# 🔑 Secure SSH Access with ProxyJump
+
+During the laboratory, direct SSH access from the Bastion to the private EC2 initially resulted in:
+
+```text
+Permission denied (publickey)
+```
+
+The network connection itself was successful, but the Bastion did not have the required private SSH key.
+
+Copying the private `.pem` file to the Bastion was intentionally avoided.
+
+Instead, **SSH ProxyJump** was used.
+
+Example:
+
+```bash
+ssh -i <key.pem> \
+-J ec2-user@<BASTION-PUBLIC-IP> \
+ec2-user@<PRIVATE-EC2-IP>
+```
+
+The resulting connection path was:
+
+```text
+Local Windows PC
+       │
+       │ SSH
+       ▼
+Bastion Host
+       │
+       │ SSH tunnel
+       ▼
+Private EC2
+```
+
+This allowed the private SSH key to remain on the local workstation.
+
+---
+
+# 🧪 Testing & Validation
+
+Several tests were performed to verify the architecture.
+
+| Test                                 | Result |
+| ------------------------------------ | ------ |
+| SSH from administrator to Bastion    | ✅ PASS |
+| Bastion Internet connectivity        | ✅ PASS |
+| Private EC2 has no Public IPv4       | ✅ PASS |
+| Bastion → Private EC2 TCP/22         | ✅ PASS |
+| SSH through ProxyJump                | ✅ PASS |
+| Private EC2 outbound Internet access | ✅ PASS |
+| NAT Gateway connectivity             | ✅ PASS |
+
+---
+
+# 🔧 Troubleshooting
+
+Troubleshooting was an important part of this project.
+
+## Issue 1 — Ping to Private EC2 Failed
+
+A ping test from the Bastion Host toward the private EC2 failed.
+
+### Cause
+
+`ping` uses ICMP while the Private EC2 Security Group was configured to permit SSH over TCP port 22.
+
+### Lesson
+
+A failed ICMP test does not necessarily mean that the required application connectivity is unavailable.
+
+Testing should focus on the protocol and port being diagnosed.
+
+---
+
+## Issue 2 — SSH Returned `Permission denied (publickey)`
+
+The command:
+
+```bash
+ssh ec2-user@<PRIVATE-EC2-IP>
+```
+
+reached the private server but failed authentication.
+
+### Analysis
+
+This result demonstrated an important troubleshooting distinction.
+
+```text
+Connection timed out
+        ↓
+Possible routing / SG / NACL / connectivity issue
+```
+
+versus:
+
+```text
+Permission denied (publickey)
+        ↓
+Network connection successful
+Authentication failed
+```
+
+The second message confirmed that TCP port 22 was reachable.
+
+---
+
+## Issue 3 — SSH Agent on Windows
+
+SSH Agent Forwarding was initially considered.
+
+However, the Windows OpenSSH Authentication Agent encountered local permission issues.
+
+Instead of transferring the private key to the Bastion Host, SSH ProxyJump was implemented.
+
+### Result
+
+Successful access to the private EC2 while keeping the SSH private key on the local workstation.
+
+---
+
+# 🔍 Key Lessons Learned
+
+This project reinforced several important cloud networking concepts:
+
+### A subnet is not public because of its name
+
+Its behavior depends on routing and the configuration of the resources inside it.
+
+### Internet Gateway and NAT Gateway solve different problems
+
+An Internet Gateway provides a path between the VPC and the Internet.
+
+A NAT Gateway allows private resources to initiate outbound Internet communication without assigning public IPv4 addresses directly to those resources.
+
+### Security Groups can reference other Security Groups
+
+This makes it possible to define access based on application or infrastructure roles rather than fixed IP addresses.
+
+### Private servers do not require direct Internet exposure
+
+Administrative access can pass through controlled mechanisms such as a Bastion Host.
+
+### Troubleshooting requires identifying the failing layer
+
+Routing, Security Groups, protocols, ports, services, and authentication should be analyzed separately.
+
+---
+
+# 🛠️ Technologies & Skills
+
+### AWS
+
+* Amazon VPC
+* Amazon EC2
+* Public & Private Subnets
+* Route Tables
+* Internet Gateway
+* NAT Gateway
+* Elastic IP
+* Security Groups
+
+### Networking
+
+* CIDR
+* TCP/IP
+* Routing
+* NAT
+* Network segmentation
+* Private addressing
+* Least-privilege network access
+
+### Systems
+
+* Amazon Linux 2023
+* SSH
+* SSH ProxyJump
+* Linux networking commands
+
+### Troubleshooting
+
+* Routing analysis
+* Security Group validation
+* TCP/22 testing
+* SSH authentication troubleshooting
+* Internet connectivity testing
+
+---
+
+# 📸 Project Evidence
+
+Screenshots included in the project documentation:
+
+* VPC configuration
+* Public and private subnets
+* Public Route Table
+* Private Route Table
+* Internet Gateway
+* NAT Gateway
+* Bastion Host
+* Private EC2 without Public IPv4
+* Security Group configuration
+* Successful SSH ProxyJump session
+* Successful Internet connectivity from Private EC2
+
+Sensitive public IP addresses and credentials are excluded from the public documentation.
+
+---
+
+# 📚 What I Learned
+
+This project helped me move beyond simply deploying AWS resources and start thinking about **how cloud infrastructure should be designed as a complete system**.
+
+The most valuable part of the laboratory was understanding how routing, NAT, security policies, private addressing, and administrative access interact.
+
+The troubleshooting process also demonstrated how to distinguish between network connectivity problems and authentication problems.
+
+---
+
+# 🚀 Next Steps
+
+This VPC will serve as a foundation for more advanced AWS projects.
+
+Future labs will introduce:
+
+* Application Load Balancers
+* Web and application servers
+* Auto Scaling
+* Private databases
+* Amazon RDS
+* IAM
+* CloudWatch
+* AWS Systems Manager
+* Multi-tier architectures
+
+The objective is to progressively transform this networking foundation into a secure and scalable cloud application architecture.
+
+---
+
+## Project Status
+
+**Completed ✅**
+
+**Focus:** AWS Networking / Cloud Infrastructure / Security / Troubleshooting
